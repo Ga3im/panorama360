@@ -88,19 +88,27 @@ export default function PanoramaViewer() {
   }, [currentPanoId, isLibLoaded]);
 
   // Плавное управление авто-вращением при переключении режима
+  // Возврат нативного гироскопа Pannellum БЕЗ лагов, задержек и перезапусков
   useEffect(() => {
-    if (
-      viewerRef.current &&
-      typeof viewerRef.current.getConfig === "function"
-    ) {
-      // Получаем текущие настройки плеера
-      const config = viewerRef.current.getConfig();
-      if (config) {
-        // Если гироскоп включен - останавливаем вращение (0), иначе возвращаем медленный осмотр (-0.3)
-        config.autoRotate = gyroActive ? 0 : -0.3;
-      }
+    if (!viewerRef.current || typeof viewerRef.current.startOrientation !== "function") return;
+
+    if (gyroActive) {
+      // Мгновенный запуск встроенного наведения прямо на ходу
+      viewerRef.current.startOrientation();
+    } else {
+      // Мгновенное выключение
+      viewerRef.current.stopOrientation();
     }
-  }, [gyroActive]);
+
+    return () => {
+      if (viewerRef.current && typeof viewerRef.current.stopOrientation === "function") {
+        try {
+          viewerRef.current.stopOrientation();
+        } catch (e) {}
+      }
+    };
+  }, [gyroActive, isLibLoaded, currentPanoId]);
+
 
   // Плавная тригонометрическая матрица наведения (Без дёрганий)
   useEffect(() => {
