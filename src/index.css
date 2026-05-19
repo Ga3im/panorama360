@@ -7,3 +7,17 @@ body {
 p {
   margin: 0;
 }
+
+.pnm-container,
+#panorama-container,
+.pnm-render-container {
+  border: none !important;
+  outline: none !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+}
+
+/* Скрываем водяной знак или ссылку на Pannellum, если она вылезает */
+.pnm-about-msg {
+  display: none !important;
+}
