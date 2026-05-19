@@ -19,14 +19,6 @@ export default function PanoramaViewer() {
   const [isLoading, setIsLoading] = useState(false);
   const [bgUrl, setBgUrl] = useState<string | null>(null);
 
-  // Рефы для фильтрации шума гироскопа (Low-Pass Filter)
-  const currentPitch = useRef<number>(0);
-  const currentYaw = useRef<number>(0);
-  const targetPitch = useRef<number>(0);
-  const targetYaw = useRef<number>(0);
-  const initialAlpha = useRef<number | null>(null);
-  const animationFrameRef = useRef<number | null>(null);
-
   const { list, currentPanoId } = useAppSelector((state: any) => state.panoramaSlice);
   const activePano = list.find((p: any) => p.id === currentPanoId);
 
@@ -36,7 +28,7 @@ export default function PanoramaViewer() {
       .catch((err) => console.error('Ошибка загрузки плеера:', err));
   }, []);
 
-  const initPannellum = () => {
+  const initPannellum = (useGyro: boolean) => {
     if (viewerRef.current) {
       try { viewerRef.current.destroy(); } catch (e) {}
       viewerRef.current = null;
@@ -52,8 +44,9 @@ export default function PanoramaViewer() {
             type: 'equirectangular',
             panorama: activePano.url,
             autoLoad: true,
-            autoRotate: gyroActive ? 0 : -0.3, 
-            orientationOnByDefault: false, // ВЫКЛЮЧАЕМ дерганый дефолтный гироскоп
+            autoRotate: useGyro ? 0 : -0.3, 
+            orientationOnByDefault: useGyro, // Встроенное нативное наведение
+            friction: 0.95, // Аппаратное гашение мелкой тряски рук
             compass: false,
             showControls: false,
             mouseZoom: true,
@@ -61,7 +54,7 @@ export default function PanoramaViewer() {
           });
 
           viewerRef.current.on('load', () => {
-            setIsLoading(false);
+            setIsLoading(false); // Выключаем лоадер, как только сцена отрендерилась
           });
         } catch (e) {
           console.error("Ошибка WebGL:", e);
@@ -75,7 +68,7 @@ export default function PanoramaViewer() {
 
   useEffect(() => {
     if (activePano && isLibLoaded) {
-      initPannellum();
+      initPannellum(gyroActive);
     }
     return () => {
       if (viewerRef.current) {
@@ -84,71 +77,6 @@ export default function PanoramaViewer() {
       }
     };
   }, [currentPanoId, activePano, isLibLoaded, gyroActive]);
-
-  // СМУЗИНГ-ФИЛЬТР ЧЕРЕЗ REQUESTANIMATIONFRAME
-  useEffect(() => {
-    if (!gyroActive || !isLibLoaded) {
-      if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
-      return;
-    }
-
-    // Постоянный цикл сглаживания кадров (Lerp)
-    const updateLoop = () => {
-      if (viewerRef.current) {
-        // КОЭФФИЦИЕНТ ПЛАВНОСТИ: 0.08 — супер-кинематографично и мягко
-        const SMOOTH = 0.08;
-
-        currentPitch.current += (targetPitch.current - currentPitch.current) * SMOOTH;
-
-        // Корректный переход Yaw через границу 180/-180 градусов
-        let diffYaw = targetYaw.current - currentYaw.current;
-        if (diffYaw > 180) diffYaw -= 360;
-        if (diffYaw < -180) diffYaw += 360;
-        currentYaw.current += diffYaw * SMOOTH;
-
-        // Используем lookAt вместо setPitch/setYaw — это не ломает наведение
-        viewerRef.current.lookAt(currentPitch.current, currentYaw.current, viewerRef.current.getHfov(), false);
-      }
-      animationFrameRef.current = requestAnimationFrame(updateLoop);
-    };
-
-    const handleOrientation = (event: DeviceOrientationEvent) => {
-      const { alpha, beta, gamma } = event;
-      if (alpha === null || beta === null || gamma === null) return;
-
-      // Нормализуем Yaw при первом включении
-      if (initialAlpha.current === null) {
-        initialAlpha.current = alpha;
-        // Синхронизируем стартовую позицию с текущим видом плеера
-        if (viewerRef.current) {
-          currentPitch.current = viewerRef.current.getPitch();
-          currentYaw.current = viewerRef.current.getYaw();
-          targetPitch.current = currentPitch.current;
-          targetYaw.current = currentYaw.current;
-        }
-      }
-
-      // Высчитываем чистые углы наклона
-      let targetP = beta - 90;
-      let targetY = -(alpha - initialAlpha.current);
-
-      // Ограничиваем наклон вверх/вниз, чтобы сфера не выворачивалась
-      if (targetP > 85) targetP = 85;
-      if (targetP < -85) targetP = -85;
-
-      targetPitch.current = targetP;
-      targetYaw.current = targetY;
-    };
-
-    window.addEventListener('deviceorientation', handleOrientation, true);
-    animationFrameRef.current = requestAnimationFrame(updateLoop);
-
-    return () => {
-      window.removeEventListener('deviceorientation', handleOrientation, true);
-      if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
-      initialAlpha.current = null;
-    };
-  }, [gyroActive, isLibLoaded, currentPanoId]);
 
   const toggleGyroMode = async () => {
     if (gyroActive) {
@@ -176,10 +104,10 @@ export default function PanoramaViewer() {
   };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
+    const file = e.target.files?.;
     if (!file) return;
 
-    setIsLoading(true);
+    setIsLoading(true); // Один единственный чистый запуск лоадера
 
     let maxWebGLSize = 4096;
     try {
@@ -249,21 +177,19 @@ export default function PanoramaViewer() {
         />
       )}
 
+      {/* ЕДИНСТВЕННЫЙ ГЛОБАЛЬНЫЙ ЛОАДЕР (Появляется и гаснет без рывков) */}
       {isLoading && (
-        <div className="absolute inset-0 flex flex-col items-center justify-center bg-slate-950/90 backdrop-blur-md z-50 transition-all duration-300">
-          <div className="relative flex items-center justify-center">
-            <div className="w-16 h-16 border-4 border-blue-500/20 border-t-blue-500 rounded-full animate-spin" />
-            <div className="absolute w-10 h-10 border-4 border-indigo-500/10 border-b-indigo-400 rounded-full animate-spin [animation-duration:0.6s]" />
-          </div>
-          <p className="mt-4 text-sm font-semibold tracking-wider text-blue-400 uppercase animate-pulse">
-            Обработка 360° сферы...
+        <div className="absolute inset-0 flex flex-col items-center justify-center bg-slate-950/90 backdrop-blur-md z-50">
+          <div className="w-12 h-12 border-4 border-blue-500/20 border-t-blue-500 rounded-full animate-spin" />
+          <p className="mt-4 text-xs font-semibold tracking-wider text-blue-400 uppercase">
+            Загрузка...
           </p>
         </div>
       )}
 
       {!activePano ? (
         <div className="flex flex-col items-center gap-6 p-4 text-center z-10">
-          <div className="text-6xl mb-2 animate-pulse">🌐</div>
+          <div className="text-6xl mb-2">🌐</div>
           <h1 className="text-2xl md:text-3xl font-bold tracking-tight bg-gradient-to-r from-blue-400 to-indigo-400 bg-clip-text text-transparent">
             Просмотр панорам 360°
           </h1>
@@ -291,7 +217,7 @@ export default function PanoramaViewer() {
               onClick={toggleGyroMode}
               className={`pointer-events-auto w-14 h-14 backdrop-blur-md border rounded-full flex items-center justify-center text-xl shadow-2xl active:scale-90 transition-all select-none ${
                 gyroActive 
-                  ? 'bg-blue-600 border-blue-400 text-white animate-pulse shadow-blue-500/40' 
+                  ? 'bg-blue-600 border-blue-400 text-white shadow-blue-500/40' 
                   : 'bg-slate-900/90 border-slate-700/60 text-slate-300'
               }`}
             >
