@@ -19,6 +19,14 @@ export default function PanoramaViewer() {
   const [isLoading, setIsLoading] = useState(false);
   const [bgUrl, setBgUrl] = useState<string | null>(null);
 
+  // Рефы для фильтрации шума гироскопа (Low-Pass Filter)
+  const currentPitch = useRef<number>(0);
+  const currentYaw = useRef<number>(0);
+  const targetPitch = useRef<number>(0);
+  const targetYaw = useRef<number>(0);
+  const initialAlpha = useRef<number | null>(null);
+  const animationFrameRef = useRef<number | null>(null);
+
   const { list, currentPanoId } = useAppSelector((state: any) => state.panoramaSlice);
   const activePano = list.find((p: any) => p.id === currentPanoId);
 
@@ -28,16 +36,13 @@ export default function PanoramaViewer() {
       .catch((err) => console.error('Ошибка загрузки плеера:', err));
   }, []);
 
-  const initPannellum = (useGyro: boolean) => {
+  const initPannellum = () => {
     if (viewerRef.current) {
-      try {
-        viewerRef.current.destroy();
-      } catch (e) {}
+      try { viewerRef.current.destroy(); } catch (e) {}
       viewerRef.current = null;
     }
     if (!isLibLoaded || !window.pannellum || !activePano) return;
 
-    // Ждем, пока нода точно появится в DOM
     const checkExist = setInterval(() => {
       const container = document.getElementById('panorama-container');
       if (container) {
@@ -47,9 +52,8 @@ export default function PanoramaViewer() {
             type: 'equirectangular',
             panorama: activePano.url,
             autoLoad: true,
-            autoRotate: useGyro ? 0 : -0.3, 
-            orientationOnByDefault: useGyro, // Родной гироскоп библиотеки
-            friction: 0.85, // Внутреннее сглаживание Pannellum для плавности
+            autoRotate: gyroActive ? 0 : -0.3, 
+            orientationOnByDefault: false, // ВЫКЛЮЧАЕМ дерганый дефолтный гироскоп
             compass: false,
             showControls: false,
             mouseZoom: true,
@@ -69,20 +73,82 @@ export default function PanoramaViewer() {
     setTimeout(() => clearInterval(checkExist), 1000);
   };
 
-  // Переинициализируем плеер строго при изменении gyroActive или смене фото
   useEffect(() => {
     if (activePano && isLibLoaded) {
-      initPannellum(gyroActive);
+      initPannellum();
     }
     return () => {
       if (viewerRef.current) {
-        try {
-          viewerRef.current.destroy();
-        } catch(e) {}
+        try { viewerRef.current.destroy(); } catch(e) {}
         viewerRef.current = null;
       }
     };
   }, [currentPanoId, activePano, isLibLoaded, gyroActive]);
+
+  // СМУЗИНГ-ФИЛЬТР ЧЕРЕЗ REQUESTANIMATIONFRAME
+  useEffect(() => {
+    if (!gyroActive || !isLibLoaded) {
+      if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
+      return;
+    }
+
+    // Постоянный цикл сглаживания кадров (Lerp)
+    const updateLoop = () => {
+      if (viewerRef.current) {
+        // КОЭФФИЦИЕНТ ПЛАВНОСТИ: 0.08 — супер-кинематографично и мягко
+        const SMOOTH = 0.08;
+
+        currentPitch.current += (targetPitch.current - currentPitch.current) * SMOOTH;
+
+        // Корректный переход Yaw через границу 180/-180 градусов
+        let diffYaw = targetYaw.current - currentYaw.current;
+        if (diffYaw > 180) diffYaw -= 360;
+        if (diffYaw < -180) diffYaw += 360;
+        currentYaw.current += diffYaw * SMOOTH;
+
+        // Используем lookAt вместо setPitch/setYaw — это не ломает наведение
+        viewerRef.current.lookAt(currentPitch.current, currentYaw.current, viewerRef.current.getHfov(), false);
+      }
+      animationFrameRef.current = requestAnimationFrame(updateLoop);
+    };
+
+    const handleOrientation = (event: DeviceOrientationEvent) => {
+      const { alpha, beta, gamma } = event;
+      if (alpha === null || beta === null || gamma === null) return;
+
+      // Нормализуем Yaw при первом включении
+      if (initialAlpha.current === null) {
+        initialAlpha.current = alpha;
+        // Синхронизируем стартовую позицию с текущим видом плеера
+        if (viewerRef.current) {
+          currentPitch.current = viewerRef.current.getPitch();
+          currentYaw.current = viewerRef.current.getYaw();
+          targetPitch.current = currentPitch.current;
+          targetYaw.current = currentYaw.current;
+        }
+      }
+
+      // Высчитываем чистые углы наклона
+      let targetP = beta - 90;
+      let targetY = -(alpha - initialAlpha.current);
+
+      // Ограничиваем наклон вверх/вниз, чтобы сфера не выворачивалась
+      if (targetP > 85) targetP = 85;
+      if (targetP < -85) targetP = -85;
+
+      targetPitch.current = targetP;
+      targetYaw.current = targetY;
+    };
+
+    window.addEventListener('deviceorientation', handleOrientation, true);
+    animationFrameRef.current = requestAnimationFrame(updateLoop);
+
+    return () => {
+      window.removeEventListener('deviceorientation', handleOrientation, true);
+      if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
+      initialAlpha.current = null;
+    };
+  }, [gyroActive, isLibLoaded, currentPanoId]);
 
   const toggleGyroMode = async () => {
     if (gyroActive) {
@@ -90,7 +156,6 @@ export default function PanoramaViewer() {
       return;
     }
 
-    // Запрос на доступ к датчикам движения (КРИТИЧНО для iOS на Vercel)
     if (
       typeof window.DeviceOrientationEvent !== 'undefined' &&
       typeof window.DeviceOrientationEvent.requestPermission === 'function'
@@ -100,13 +165,12 @@ export default function PanoramaViewer() {
         if (permissionState === 'granted') {
           setGyroActive(true);
         } else {
-          alert('Доступ к датчикам отклонен. Включите доступ в настройках Safari для этого сайта.');
+          alert('Доступ к датчикам отклонен.');
         }
       } catch (error) {
         console.error("Ошибка датчиков:", error);
       }
     } else {
-      // Android / ПК
       setGyroActive(true);
     }
   };
@@ -136,11 +200,7 @@ export default function PanoramaViewer() {
           setBgUrl(originalUrl);
           const shortName = file.name.length > 25 ? `${file.name.substring(0, 22)}...` : file.name;
 
-          dispatch(addPanorama({
-            id: `custom-${Date.now()}`,
-            title: shortName,
-            url: originalUrl
-          }));
+          dispatch(addPanorama({ id: `custom-${Date.now()}`, title: shortName, url: originalUrl }));
           return;
         }
 
@@ -158,10 +218,7 @@ export default function PanoramaViewer() {
         if (ctx) {
           ctx.drawImage(img, 0, 0, width, height);
           canvas.toBlob((blob) => {
-            if (!blob) {
-              setIsLoading(false);
-              return;
-            }
+            if (!blob) { setIsLoading(false); return; }
             const optimizedUrl = URL.createObjectURL(blob);
             setBgUrl(optimizedUrl);
             const shortName = file.name.length > 25 ? `${file.name.substring(0, 22)}...` : file.name;
